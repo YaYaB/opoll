@@ -109,11 +109,25 @@ Use the `https://...ngrok.io` URL as the base for your Request URLs, e.g. `https
 
 ### Environment variables
 
+For **local development**, copy `.env-template` to `.env` and fill in:
+
 | Variable | Description |
 |----------|-------------|
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | Signing Secret from app credentials |
 | `PORT` | Server port (default: 3000) |
+
+The app loads `.env` locally via `python-dotenv`, but **Elastic Beanstalk does _not_ read your local `.env` file** when you deploy.
+
+On **Elastic Beanstalk**, set these as **Environment properties** (per environment), for example with the EB CLI:
+
+```bash
+eb setenv \
+  SLACK_BOT_TOKEN=xoxb-your-token \
+  SLACK_SIGNING_SECRET=your-signing-secret
+```
+
+You only need to run `eb setenv` again when the values change; regular `eb deploy` reuses them.
 
 ## Deploy on AWS
 
@@ -195,23 +209,23 @@ Suitable instance types:
    - **Instance types:** `t4g.nano`.
 3. Apply and let the environment update (or set these when creating the environment).
 
-**Option B – EB CLI with included config**
+**Option B – EB CLI with command-line flag**
 
-1. **Init** with the **Arm** Python platform so the environment is Graviton from the start:
+1. **Init** with the standard Python platform:
    ```bash
-   eb platform list
+   eb init -p python-3.11 opoll --region eu-west-3
    ```
-   Pick the platform that includes **Arm** (e.g. *Python 3.11 running on 64bit Arm Amazon Linux 2*). Then:
+   Note: Modern Python platforms support both x86 and ARM architectures. The architecture is configured at the instance level.
+
+2. **Create** the environment with ARM instance type using the command-line flag:
    ```bash
-   eb init -p "Python 3.11 running on 64bit Arm Amazon Linux 2" opoll --region eu-west-3
+   eb create opoll-env --instance-types t4g.nano
    ```
-2. **Create** the environment. The repo includes `.ebextensions/01-t4g-nano.config`, which sets the instance type to **t4g.nano** for every deploy:
-   ```bash
-   eb create opoll-env
-   ```
+   This sets the instance type during environment creation. For subsequent deploys, you can configure it in the AWS Console (Configuration → Capacity → Instance types) or use `eb config` to save the setting.
+
 3. Set env vars and Slack URLs as in the main deployment steps.
 
-If the Arm platform name differs in your region, use the one that contains `Arm` from `eb platform list`. If you already created an x86 environment, you cannot switch it to ARM; create a new environment with the Arm platform and t4g.nano instead.
+**Note:** If ARM platforms aren't available in your region, or if you encounter errors with t4g.nano, you can use x86 instances instead (e.g., `t3.micro`) which are also cost-effective and Free Tier eligible.
 
 ### Optional: HTTPS with a custom domain
 

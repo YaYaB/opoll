@@ -259,10 +259,27 @@ flask_app = Flask(__name__)
 handler = SlackRequestHandler(app)
 
 
+@flask_app.route("/", methods=["GET"])
+def health_check():
+    """Basic health check endpoint for Elastic Beanstalk."""
+    return "OK", 200
+
+
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
     """Single endpoint for slash commands and interactivity (button clicks)."""
-    return handler.handle(request)
+    try:
+        logger.info(f"Received Slack request: {request.method} {request.path}")
+        result = handler.handle(request)
+        logger.info("Slack request handled successfully")
+        return result
+    except Exception as e:
+        logger.exception(f"Error handling Slack request: {e}")
+        # Log request details for debugging
+        logger.error(f"Request headers: {dict(request.headers)}")
+        logger.error(f"Request data: {request.get_data(as_text=True)[:500]}")
+        # Return 200 to prevent Slack from retrying invalid requests
+        return {"error": str(e)}, 200
 
 
 if __name__ == "__main__":
