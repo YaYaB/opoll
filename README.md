@@ -150,9 +150,17 @@ You can run the app on **AWS Elastic Beanstalk** so it’s always on and reachab
 
 2. **Create and start an environment**:
 
+   **Option A: Standard (with load balancer)** — ~\$20–\$23/month:
    ```bash
-   eb create opoll-env
+   eb create opoll-env --instance-types t4g.nano
    ```
+
+   **Option B: Single-instance (no load balancer)** — ~\$3–\$5/month (cheapest EB option):
+   ```bash
+   eb create opoll-env --single --instance-types t4g.nano
+   ```
+   The `--single` flag creates a single-instance environment without a load balancer, saving ~\$16–\$17/month.
+
    This creates the environment and deploys the app. The first run can take several minutes.
 
 3. **Set environment variables** in the AWS console or via CLI:
@@ -196,6 +204,57 @@ Suitable instance types:
 | **t3.micro** | 2    | 1 GiB  | **Recommended (x86).** Burstable, low cost. [Free Tier](https://aws.amazon.com/free/) eligible (12 months) in many regions. |
 
 **In Elastic Beanstalk:** open **Configuration** → **Capacity** and set **Instance types** to the type you want (e.g. `t3.micro` or `t4g.nano`). The default may be larger.
+
+### Approximate AWS cost (Elastic Beanstalk)
+
+These are **rough ballpark estimates only** for running this app in a single environment in `eu-west-3`. Always check the [AWS Pricing Calculator](https://calculator.aws/#/) for up‑to‑date numbers.
+
+**Important:** Elastic Beanstalk uses an **Application Load Balancer (ALB)** by default, which charges **hourly** (~\$0.0225/hour ≈ **\$16–\$17/month**) regardless of traffic. This is the main cost driver, even for very low usage.
+
+- **Compute (EC2)**  
+  - **t4g.nano**: roughly **\$3–\$5 / month** if running 24/7.  
+  - **t3.micro**: roughly **\$8–\$12 / month** (often Free Tier for 12 months).
+
+- **Application Load Balancer (ALB)**  
+  - **Hourly charge**: ~\$16–\$17/month (runs 24/7, regardless of traffic).  
+  - **LCU charges**: Minimal for low traffic (3–4 requests/week ≈ pennies/month).  
+  - **Note**: ALB charges apply even if your app receives zero requests.
+
+- **Other costs**  
+  - S3 storage for app versions and logs: **\< \$1 / month** at small scale.  
+  - Data transfer: First 100 GB/month free, then ~\$0.09/GB (usually negligible for this app).
+
+- **Total rough estimate**  
+  - **t4g.nano + ALB**: about **\$20–\$23 / month** (mostly ALB + instance).  
+  - **t3.micro + ALB**: about **\$25–\$30 / month**.
+
+**For very low usage (3–4 times/week):**  
+The ALB hourly charge (~\$16–\$17/month) dominates, so your total cost stays roughly the same regardless of request volume. Traffic-based charges are negligible.
+
+**Cheaper alternatives for low-traffic usage:**
+
+1. **Single-instance Elastic Beanstalk (no ALB)** — **~\$3–\$5/month**  
+   Configure EB to use a single instance without a load balancer:
+   ```bash
+   eb create opoll-env --single --instance-types t4g.nano
+   ```
+   Or in EB Console: **Configuration** → **Capacity** → **Environment type**: **Single instance** (saves ~\$16–\$17/month by removing ALB).
+
+2. **AWS Lambda + API Gateway** — **~\$0–\$1/month** for 3–4 requests/week  
+   Pay-per-request pricing. With AWS Free Tier (1M requests/month for 12 months), this could be **essentially free**. Requires refactoring the app to work with Lambda (serverless), but very cost-effective for sporadic usage.
+
+3. **Direct EC2 instance** (without Elastic Beanstalk) — **~\$3–\$5/month**  
+   Run the app directly on a t4g.nano EC2 instance. No ALB, no EB overhead. Requires manual setup (SSH, nginx, systemd, etc.) but cheapest "always-on" option.
+
+**Recommendation for 3–4 requests/week:**  
+- **Lambda + API Gateway** = cheapest (~\$0/month with Free Tier, then pennies)  
+- **Single-instance EB** = easiest to set up, ~\$3–\$5/month  
+- **Standard EB with ALB** = most expensive (~\$20–\$23/month) but easiest to manage
+
+**Cost optimization tips:**
+- **Shut down the environment** when not needed: `eb terminate opoll-env` (recreate with `eb create` when needed).  
+- Use **single-instance mode** to avoid ALB charges.  
+- Use **t4g.nano** instead of t3.micro to save ~\$5/month on compute.
 
 ### Initializing with t4g.nano (ARM)
 
