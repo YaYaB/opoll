@@ -1,0 +1,4 @@
+# .ebextensions file with invalid YAML in HEAD; exclude from EB app versions
+.ebextensions/01-t4g-nano.config
+.venv/
+.env
