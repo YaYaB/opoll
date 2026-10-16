@@ -7,6 +7,7 @@ A free, open-source Slack app to create polls with multiple options. Anyone can 
 - **Slash command** `/opoll` with a question and bullet-point options
 - **One click to vote** — names appear next to the option
 - **One vote per user** — changing your vote moves your name to the new option
+- **Recurring polls** — `/opoll schedule` posts a poll every N weeks, with dates in the question filled in automatically
 - No database required (state is stored in the message)
 
 ## Usage
@@ -46,6 +47,18 @@ Or with **double-quoted** question and options (handy for spaces or punctuation 
 Or: `/opoll multiple Pick your toppings • Cheese • Pepperoni • Mushrooms`
 
 Use `•` or `-` for bullet points. People click **Vote** next to an option; their name is shown next to that option. The poll message shows "Single choice" or "Multiple choice" at the bottom.
+
+**Recurring polls**: put `schedule <weekday> <HH:MM>` (plus optional `every N weeks`, `starting YYYY-MM-DD`, `times N`) before a normal poll. For example, every Friday at 12:00 for the following week:
+
+```
+/opoll schedule friday 12:00 every 1 week multiple "On which days do you remote the week beginning on Monday {next_monday} (Mandatory days in the office: Monday, Tuesday, Thursday)?" "Monday Morning" "Monday Afternoon" "Tuesday Morning" "Tuesday Afternoon" "Wednesday Morning" "Wednesday Afternoon" "Thursday Morning" "Thursday Afternoon" "Friday Morning" "Friday Afternoon"
+```
+
+- `{next_monday}` … `{next_sunday}` are replaced, for each occurrence, by the next such day after the posting date (`2026-09-07` when posted on Friday 2026-09-04). Use `{next_monday:%d/%m}` for any other [strftime](https://strftime.org/) format.
+- Use `every 2 weeks` for every other week; `starting 2026-11-06` picks which week the series starts on.
+- Polls are queued in Slack with [`chat.scheduleMessage`](https://api.slack.com/methods/chat.scheduleMessage), which only accepts dates up to **120 days** ahead: without `times N`, every occurrence in that window is queued. Run the command again later to extend the series.
+- Times are in the `OPOLL_TIMEZONE` time zone (default `UTC`).
+- `/opoll scheduled` lists the polls queued in the channel with their ids; `/opoll unschedule <id>` or `/opoll unschedule all` cancels them.
 
 ## Setup
 
@@ -116,6 +129,7 @@ For **local development**, copy `.env-template` to `.env` and fill in:
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | Signing Secret from app credentials |
 | `PORT` | Server port (default: 3000) |
+| `OPOLL_TIMEZONE` | IANA time zone for `/opoll schedule` times, e.g. `Europe/Paris` (default: `UTC`) |
 
 The app loads `.env` locally via `python-dotenv`, but **Elastic Beanstalk does _not_ read your local `.env` file** when you deploy.
 
