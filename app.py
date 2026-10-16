@@ -11,10 +11,15 @@ Usage:
     • Option A
     • Option B
     /opoll multiple "Question?" "A" "B" "C"
+  Recurring polls (queued in Slack with chat.scheduleMessage, up to 120 days ahead):
+    /opoll schedule friday 12:00 every 2 weeks multiple "Week of Monday {next_monday}?" "A" "B"
+    /opoll scheduled            # list polls queued in this channel
+    /opoll unschedule <id|all>  # cancel one or all of them
 """
+import datetime
 import os
-import re
 import logging
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -23,6 +28,17 @@ load_dotenv()
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from flask import Flask, request
+
+from slack_sdk.errors import SlackApiError
+
+from poll_logic import build_poll_blocks, parse_poll_text, parse_votes_from_blocks
+from schedule_logic import (
+    ScheduleError,
+    get_subcommand,
+    occurrences,
+    parse_schedule_text,
+    render_question,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,148 +49,6 @@ app = App(
 )
 
 
-def parse_poll_text(text: str) -> tuple[str, list[str], bool]:
-    """Parse /opoll command text into question, list of options, and multiple_choice flag.
-    Supports:
-      - Double-quoted: "Question?" "Option1" "Option2" (space-separated, any number of spaces)
-      - Bullet points • or - at start of line
-      - Single line: Question? • A • B • C
-    Leading "multiple" or "--multiple" (case-insensitive) enables multiple choice.
-    """
-    if not text or not text.strip():
-        return "Poll question?", ["Option 1", "Option 2"], False
-
-    raw = text.strip()
-    multiple = False
-    if re.match(r"^(?:multiple|--multiple)\b", raw, re.IGNORECASE):
-        multiple = True
-        raw = re.sub(r"^(?:multiple|--multiple)\s*", "", raw, count=1, flags=re.IGNORECASE).strip()
-
-    # Double-quoted format: "What's for lunch?" "Pizza" "Sushi" "Salad"
-    quoted = re.findall(r'"([^"]*)"', raw)
-    if len(quoted) >= 2:
-        question = quoted[0].strip() or "Poll question?"
-        options = [s.strip() for s in quoted[1:] if s.strip()]
-        if options:
-            return question, options, multiple
-        return question, ["Yes", "No"], multiple
-    if len(quoted) == 1:
-        return quoted[0].strip() or "Poll question?", ["Yes", "No"], multiple
-
-    lines = [line.strip() for line in raw.split("\n") if line.strip()]
-    bullet_pattern = re.compile(r"^[\•\-]\s*")
-
-    # Single line with " • " separators: "Question? • Option1 • Option2"
-    if len(lines) == 1 and " • " in lines[0]:
-        parts = [p.strip() for p in lines[0].split(" • ") if p.strip()]
-        if len(parts) >= 2:
-            return parts[0], parts[1:], multiple
-        if len(parts) == 1:
-            return parts[0], ["Yes", "No"], multiple
-
-    question_parts = []
-    options = []
-
-    for line in lines:
-        if bullet_pattern.match(line):
-            option = bullet_pattern.sub("", line).strip()
-            if option:
-                options.append(option)
-        else:
-            if not options:
-                question_parts.append(line)
-            else:
-                pass
-
-    question = " ".join(question_parts).strip() if question_parts else "Poll question?"
-    if not options:
-        options = ["Yes", "No"]
-
-    return question, options, multiple
-
-
-def build_poll_blocks(
-    question: str,
-    options: list[str],
-    votes: dict[int, list[str]] | None = None,
-    multiple_choice: bool = False,
-) -> list[dict]:
-    """Build Block Kit blocks for the poll message.
-    votes: optional dict option_index -> list of user_ids (for display as <@UID>)
-    multiple_choice: if True, users can vote for several options; we store mode in a context block.
-    """
-    votes = votes or {}
-    blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": question[:150], "emoji": True},
-        },
-    ]
-    for i, option in enumerate(options):
-        voter_ids = votes.get(i, [])
-        if voter_ids:
-            voters_mrkdwn = " ".join(f"<@{uid}>" for uid in voter_ids)
-            line = f"• {option} — {voters_mrkdwn}"
-        else:
-            line = f"• {option}"
-        blocks.append(
-            {
-                "type": "section",
-                "block_id": f"option_{i}",
-                "text": {"type": "mrkdwn", "text": line},
-                "accessory": {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Vote", "emoji": True},
-                    "action_id": "vote",
-                    "value": str(i),
-                },
-            }
-        )
-    mode_block_id = "meta_multiple" if multiple_choice else "meta_single"
-    mode_label = "Multiple choice" if multiple_choice else "Single choice"
-    blocks.append(
-        {
-            "type": "context",
-            "block_id": mode_block_id,
-            "elements": [{"type": "mrkdwn", "text": mode_label}],
-        }
-    )
-    return blocks
-
-
-def parse_votes_from_blocks(blocks: list[dict]) -> tuple[str, list[str], dict[int, list[str]], bool]:
-    """Extract question, option labels, current votes, and multiple_choice from message blocks."""
-    question = "Poll"
-    options = []
-    votes = {}
-    multiple_choice = False
-
-    for block in blocks:
-        if block.get("type") == "header":
-            question = block.get("text", {}).get("text", "Poll")
-        elif block.get("type") == "section" and block.get("block_id", "").startswith("option_"):
-            idx_str = block.get("block_id", "").replace("option_", "")
-            try:
-                idx = int(idx_str)
-            except ValueError:
-                continue
-            text = block.get("text", {}).get("text", "")
-            if " — " in text:
-                option_part, voters_part = text.split(" — ", 1)
-                option_name = option_part.strip().lstrip("•").strip()
-                user_ids = re.findall(r"<@(U[A-Z0-9]+)>", voters_part)
-                votes[idx] = user_ids
-            else:
-                option_name = text.strip().lstrip("•").strip()
-                votes[idx] = []
-            options.append((idx, option_name))
-        elif block.get("type") == "context" and block.get("block_id") == "meta_multiple":
-            multiple_choice = True
-
-    options_sorted = [opt[1] for opt in sorted(options, key=lambda x: x[0])]
-    return question, options_sorted, votes, multiple_choice
-
-
 @app.command("/opoll")
 def handle_poll_command(ack, body, client, command, respond):
     """Handle /opoll  <question> with bullet list of options."""
@@ -182,6 +56,14 @@ def handle_poll_command(ack, body, client, command, respond):
     text = command.get("text", "")
     channel_id = body.get("channel_id")
     user_id = body.get("user_id")
+
+    subcommand = get_subcommand(text)
+    if subcommand == "schedule":
+        return handle_schedule(client, channel_id, text, respond)
+    if subcommand == "scheduled":
+        return handle_list_scheduled(client, channel_id, respond)
+    if subcommand == "unschedule":
+        return handle_unschedule(client, channel_id, text, respond)
 
     question, options, multiple_choice = parse_poll_text(text)
     blocks = build_poll_blocks(question, options, multiple_choice=multiple_choice)
@@ -195,20 +77,113 @@ def handle_poll_command(ack, body, client, command, respond):
         )
     except Exception as e:
         logger.exception("Failed to post poll")
-        err = getattr(e, "response", None)
-        err_code = err.get("error") if err and hasattr(err, "get") else None
-        if err_code == "channel_not_found":
-            msg = (
-                "I can't post in this channel. "
-                "Invite me here: type `/invite @YourPollApp` in the channel, "
-                "or add the scope `chat:write.public` to the app (for public channels only)."
-            )
-        else:
-            msg = f"Failed to create poll: {e}"
+        reply_ephemeral(respond, slack_error_message(e, "Failed to create poll"))
+
+
+def slack_error_message(e: Exception, prefix: str) -> str:
+    err = getattr(e, "response", None)
+    err_code = err.get("error") if err and hasattr(err, "get") else None
+    if err_code == "channel_not_found":
+        return (
+            "I can't post in this channel. "
+            "Invite me here: type `/invite @YourPollApp` in the channel, "
+            "or add the scope `chat:write.public` to the app (for public channels only)."
+        )
+    return f"{prefix}: {e}"
+
+
+def reply_ephemeral(respond, text: str) -> None:
+    try:
+        respond(text=text, response_type="ephemeral")
+    except Exception:
+        logger.exception("Could not send reply to user")
+
+
+def schedule_timezone() -> ZoneInfo:
+    return ZoneInfo(os.environ.get("OPOLL_TIMEZONE", "UTC"))
+
+
+def handle_schedule(client, channel_id, text, respond):
+    """/opoll schedule ...: queue every occurrence of a recurring poll in Slack."""
+    try:
+        spec = parse_schedule_text(text)
+    except ScheduleError as e:
+        return reply_ephemeral(respond, str(e))
+
+    tz = schedule_timezone()
+    post_times = occurrences(spec, datetime.datetime.now(tz))
+    if not post_times:
+        return reply_ephemeral(
+            respond, "Nothing to schedule: the first occurrence is more than 120 days away (Slack's limit)."
+        )
+
+    question_template, options, multiple_choice = parse_poll_text(spec.poll_text)
+    scheduled = []
+    for post_at in post_times:
+        question = render_question(question_template, post_at.date())
         try:
-            respond(text=msg, response_type="ephemeral")
-        except Exception:
-            logger.exception("Could not send error reply to user")
+            client.chat_scheduleMessage(
+                channel=channel_id,
+                post_at=int(post_at.timestamp()),
+                text=f"Poll: {question} ({len(options)} options)",
+                blocks=build_poll_blocks(question, options, multiple_choice=multiple_choice),
+            )
+        except SlackApiError as e:
+            logger.exception("Failed to schedule poll")
+            done = f"Scheduled {len(scheduled)} of {len(post_times)} polls. " if scheduled else ""
+            return reply_ephemeral(respond, done + slack_error_message(e, "Failed to schedule poll"))
+        scheduled.append(post_at)
+
+    dates = "\n".join(f"• {dt:%a %Y-%m-%d %H:%M}" for dt in scheduled)
+    reply_ephemeral(
+        respond,
+        f"Scheduled {len(scheduled)} poll(s) ({tz.key}):\n{dates}\n"
+        "Run `/opoll schedule ...` again later to extend beyond 120 days.",
+    )
+
+
+def list_scheduled_messages(client, channel_id) -> list[dict]:
+    messages, cursor = [], None
+    while True:
+        resp = client.chat_scheduledMessages_list(channel=channel_id, cursor=cursor, limit=100)
+        messages.extend(resp.get("scheduled_messages", []))
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            return sorted(messages, key=lambda m: m.get("post_at", 0))
+
+
+def handle_list_scheduled(client, channel_id, respond):
+    """/opoll scheduled: list polls queued in this channel."""
+    try:
+        messages = list_scheduled_messages(client, channel_id)
+    except SlackApiError as e:
+        logger.exception("Failed to list scheduled polls")
+        return reply_ephemeral(respond, slack_error_message(e, "Failed to list scheduled polls"))
+    if not messages:
+        return reply_ephemeral(respond, "No poll scheduled in this channel.")
+
+    tz = schedule_timezone()
+    lines = [
+        f"• `{m['id']}` {datetime.datetime.fromtimestamp(m['post_at'], tz):%a %Y-%m-%d %H:%M} — {m.get('text', '')}"
+        for m in messages
+    ]
+    reply_ephemeral(respond, f"Scheduled polls ({tz.key}):\n" + "\n".join(lines))
+
+
+def handle_unschedule(client, channel_id, text, respond):
+    """/opoll unschedule <id|all>: cancel queued polls in this channel."""
+    target = text.strip().split(maxsplit=1)[1].strip() if len(text.split()) > 1 else ""
+    if not target:
+        return reply_ephemeral(respond, "Usage: `/opoll unschedule <id|all>` (ids from `/opoll scheduled`).")
+
+    try:
+        ids = [m["id"] for m in list_scheduled_messages(client, channel_id)] if target.lower() == "all" else [target]
+        for scheduled_id in ids:
+            client.chat_deleteScheduledMessage(channel=channel_id, scheduled_message_id=scheduled_id)
+    except SlackApiError as e:
+        logger.exception("Failed to cancel scheduled poll")
+        return reply_ephemeral(respond, slack_error_message(e, "Failed to cancel scheduled poll"))
+    reply_ephemeral(respond, f"Cancelled {len(ids)} scheduled poll(s).")
 
 
 @app.action("vote")
